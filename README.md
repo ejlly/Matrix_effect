@@ -12,4 +12,6 @@ Quit with CTRL+c
 
 # Compilation
 
-Compile with make
+Compilation tested on Ubuntu 20.04 LTS
+
+Compile with make to generate executable
