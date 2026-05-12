@@ -1,225 +1,210 @@
 #include <cstdio>
-#include <cstdlib>
-#include <ctime>
 #include <termios.h>
-#include <unistd.h>
-#include <random>
 #include <csignal>
+#include <vector>
+#include <random>
+#include <string_view>
+#include <thread>
 
-using namespace std;
+class Terminal {
+public:
+    Terminal() {
+        tcgetattr(STDIN_FILENO, &old_);
+        new_ = old_;
+        new_.c_lflag &= ~(ICANON | ECHO);
+        tcsetattr(STDIN_FILENO, TCSANOW, &new_);
+        std::printf("\033[?25l\033[?1049h");   //hide cursor, alternate buffer
+    }
 
-/*
-green colors from darkest to brightest:
-R	G	B
-13	2	8
-0	59	0
-0	143	17
-0	255	65
-*/
+    ~Terminal() {
+		//reset colors, restore original screen buffer, visible cursor
+        std::printf("\033[m\033[?1049l\033[?25h");
+        tcsetattr(STDIN_FILENO, TCSADRAIN, &old_);
+    }
 
-int nbCol(0), nbLig(0);
+private:
+    termios old_, new_;
+};
 
-int const ALPHABET_SIZE = 55;
-const char *alphabet[ALPHABET_SIZE];
-bool keepRunning = true;
-
-void signalHandler(int dummy){
-	keepRunning = false;
+static std::mt19937& rng() {
+    static std::mt19937 gen(std::random_device{}());
+    return gen;
 }
 
-int color_tab[12] = { 13,	2,		8,
-					  0,	59,		0,
-					  0,	143,	17,
-					  0,	255,	65};
+volatile std::sig_atomic_t keepRunning = true;
 
-int evaluate(int char_index){
-	if(char_index >= 0) return char_index;
-	return rand()%ALPHABET_SIZE;
+void signalHandler(int) {
+    keepRunning = false;
 }
 
-class Word{
+void getTerminalSize(int& rows, int& cols) {
+	//save cursor position, set to down right corner, get pos, reset to saved position
+    std::printf("\033[s\033[999;999H\033[6n\033[u");
+    std::fflush(stdout);
+    std::scanf("\033[%d;%dR", &rows, &cols);
+}
+
+bool any_key_pressed() {
+	fd_set read_fds;
+	FD_ZERO(&read_fds);
+	FD_SET(STDIN_FILENO, &read_fds);
+
+	timeval timeout {0, 0};
+	if (select(STDIN_FILENO + 1, &read_fds, nullptr, nullptr, &timeout) > 0 && FD_ISSET(STDIN_FILENO, &read_fds)) {
+		char ch;
+		if (read(STDIN_FILENO, &ch, 1) > 0) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+class Word {
+	private:
+		int m_size = 0;
+		int m_position = 0;
+		std::vector<int> m_char_index, m_lv; //lv stands for light level
+
+		static constexpr int max_word_length = 30;
+		static int s_screen_height;
+
 	public:
-		Word(){
-			m_size = rand()%31;
-			m_position = 0;
-			m_char_index = new int[m_size];
-			m_lv = new int[m_size];
+		static const std::vector<int>& color_tab() {
+			static const std::vector<int> tab = {
+				13,	2,	8,
+				0,	59,	0,
+				0,	143,	17,
+				0,	255,	65
+			};
+			return tab;
+		}
 
-			for(int i(0); i<m_size; i++){
-				if(rand()%7==0)
-					m_char_index[i] = -1;
-				else
-					m_char_index[i] = rand()%ALPHABET_SIZE;
+		static const std::vector<std::string_view>& alphabet() {
+			static const std::vector<std::string_view> alphabet = {
+				"\u65e5", "\uff8a", "\uff90", "\uff8b", "\uff70",
+				"\uff73", "\uff7c", "\uff85", "\uff93", "\uff86",
+				"\uff7b", "\uff9c", "\uff82", "\uff75", "\uff98",
+				"\uff71", "\uff8e", "\uff83", "\uff8f", "\uff79",
+				"\uff92", "\uff74", "\uff76", "\uff77", "\uff91",
+				"\uff95", "\uff97", "\uff7e", "\uff88", "\uff7d",
+				"\uff80", "\uff87", "\uff8d", "\u0054", "\u0048",
+				"\u0045", "\u004d", "\u0041", "\u0054", "\u0052",
+				"\u0049", "\u0058", "\u005a", "\u003a", "\u30fb",
+				"\u002e", "\u0022", "\u003d", "\u002a", "\u002b",
+				"\u002d", "\u003c", "\u003e", "\u00a6", "\uff5c"
+			};
+			return alphabet;
+		}
 
-				if(i<=m_size/4)
-					m_lv[i] = 2+rand()%2;
-				else if(i<=3*m_size/4)
-					m_lv[i] = 1+rand()%2;
+		static void set_screen_height(int h) {
+			s_screen_height = h;
+		}
+
+		Word() {
+			static std::binomial_distribution<int> size_dist(max_word_length, 0.5);
+			m_size = size_dist(rng()) + 1;
+			m_char_index.resize(m_size);
+			m_lv.resize(m_size);
+
+			std::uniform_int_distribution<int> char_dist(0, alphabet().size() - 1);
+			std::uniform_int_distribution<int> mod7(0, 6);
+			std::uniform_int_distribution<int> coin(0, 1);
+
+			for (int i(0); i<m_size; i++) {
+				//1/7 chance to be a char that changes each time
+				m_char_index[i] = (mod7(rng()) == 0) ? -1 : char_dist(rng());
+
+				if (i <= m_size/4)
+					m_lv[i] = 2 + coin(rng());
+				else if (i <= 3*m_size/4)
+					m_lv[i] = 1 + coin(rng());
 				else
-					m_lv[i] = rand()%2;
+					m_lv[i] = coin(rng());
 			}
 		}
 
-		bool advance(int column){
+		bool advance(std::string& buffer, int column) {
 			//yields true if needs to be suppressed, and false otherwise
 			m_position++;
-			for(int i(0); i<m_size; i++){
-				if(0 <= m_position - i && nbLig > m_position - i){
-					int const char_value = evaluate(m_char_index[i]);
-					 
-					 printf("\033[%d;%dH\033[48;2;0;0;0m\033[38;2;%d;%d;%dm%s", m_position - i, column, 
-															color_tab[3*m_lv[i]], color_tab[3*m_lv[i]+1], color_tab[3*m_lv[i]+2], 
-																alphabet[char_value]);
-					fflush(stdout);
+
+			static std::uniform_int_distribution<int> rand_char(0, alphabet().size() - 1);
+			const auto& color_tab = Word::color_tab();
+
+			for (int i(0); i<m_size; i++) {
+				if (0 <= m_position - i && s_screen_height > m_position - i) {
+					int const char_value = (m_char_index[i] >= 0)?
+						m_char_index[i]:
+						rand_char(rng());
+
+
+					buffer += "\033[" + std::to_string(m_position - i) + ";" + std::to_string(column) + "H";
+					buffer += "\033[38;2;" + std::to_string(color_tab[3 * m_lv[i]]) + ";" +
+						std::to_string(color_tab[3 * m_lv[i] + 1]) + ";" +
+						std::to_string(color_tab[3 * m_lv[i] + 2]) + "m";
+					buffer += Word::alphabet()[char_value];
 				}
-				if(0 <= m_position - m_size){
-					printf("\033[%d;%dH ", m_position - m_size, column);
-					fflush(stdout);
+				if (0 <= m_position - m_size) {
+					buffer += "\033[" + std::to_string(m_position - m_size) + ";" + std::to_string(column) + "H ";
 				}
 			}
-			if(m_position - m_size == nbLig) return true;
+			if (m_position - m_size == s_screen_height) return true;
 			return false;
 		}
 
-	private:
-		int m_size, m_position;
-		int *m_char_index, *m_lv; //lv stands for light level
 };
 
-int main(){
+int Word::s_screen_height = 0;
+
+int main() {
+	Terminal term;
+	std::signal(SIGINT, signalHandler);
 	
-	srand(time(NULL));
+	int nbCol(0), nbLig(0);
+	getTerminalSize(nbLig, nbCol);
 
-	//initialize the alphabet which are unicode characters
+	Word::set_screen_height(nbLig);
 
-	alphabet[0] = "\u65e5";
-	alphabet[1] = "\uff8a";
-	alphabet[2] = "\uff90";
-	alphabet[3] = "\uff8b";
-	alphabet[4] = "\uff70";
-	alphabet[5] = "\uff73";
-	alphabet[6] = "\uff7c";
-	alphabet[7] = "\uff85";
-	alphabet[8] = "\uff93";
-	alphabet[9] = "\uff86";
-	alphabet[10] = "\uff7b";
-	alphabet[11] = "\uff9c";
-	alphabet[12] = "\uff82";
-	alphabet[13] = "\uff75";
-	alphabet[14] = "\uff98";
-	alphabet[15] = "\uff71";
-	alphabet[16] = "\uff8e";
-	alphabet[17] = "\uff83";
-	alphabet[18] = "\uff8f";
-	alphabet[19] = "\uff79";
-	alphabet[20] = "\uff92";
-	alphabet[21] = "\uff74";
-	alphabet[22] = "\uff76";
-	alphabet[23] = "\uff77";
-	alphabet[24] = "\uff91";
-	alphabet[25] = "\uff95";
-	alphabet[26] = "\uff97";
-	alphabet[27] = "\uff7e";
-	alphabet[28] = "\uff88";
-	alphabet[29] = "\uff7d";
-	alphabet[30] = "\uff80";
-	alphabet[31] = "\uff87";
-	alphabet[32] = "\uff8d";
-	alphabet[33] = "\u0054";
-	alphabet[34] = "\u0048";
-	alphabet[35] = "\u0045";
-	alphabet[36] = "\u004d";
-	alphabet[37] = "\u0041";
-	alphabet[38] = "\u0054";
-	alphabet[39] = "\u0052";
-	alphabet[40] = "\u0049";
-	alphabet[41] = "\u0058";
-	alphabet[42] = "\u005a";
-	alphabet[43] = "\u003a";
-	alphabet[44] = "\u30fb";
-	alphabet[45] = "\u002e";
-	alphabet[46] = "\u0022";
-	alphabet[47] = "\u003d";
-	alphabet[48] = "\u002a";
-	alphabet[49] = "\u002b";
-	alphabet[50] = "\u002d";
-	alphabet[51] = "\u003c";
-	alphabet[52] = "\u003e";
-	alphabet[53] = "\u00a6";
-	alphabet[54] = "\uff5c";
-
-	/*
-	for(int i(0); i<ALPHABET_SIZE; i++){
-		printf("%s\n", alphabet[i]);
-	}
-	*/
-
-
-	struct termios old_term, new_term;
-	if(tcgetattr(STDIN_FILENO, &old_term) != 0){
-		printf("Couldn't get old terminal attributes\n");
-		return 1;
-	}
-	
-	new_term = old_term;
-	new_term.c_lflag &=~ICANON;
-	new_term.c_lflag &=~ECHO;
-
-	if(tcsetattr(STDIN_FILENO, TCSANOW, &new_term) != 0){
-		printf("Couldn't modify terminal attributes\n");
-		return 1;
-	}
-	
-	printf("\033[?25l"); //invisible cursor
-	printf("\033[2J\n"); //clear screen
-
-	printf("\033[s\033[999;999H\033[6n\033[u\n"); 
-	//save cursor position, set to down right corner, get pos, reset to saved position
-
-	
-	
-	scanf("\033[%d;%d R", &nbLig, &nbCol);  
-
-	printf("\033[m");
-
-	for(int i(0); i<nbLig; i++){
-		for(int _(0); _<nbCol; _++){
-			printf("\033[48;2;0;0;0m ");
+	//fill the screen with black spaces
+	printf("\033[m\033[48;2;0;0;0m"); //reset attributes
+	for (int i(0); i<nbLig; i++){
+		for (int j(0); j<nbCol; j++){
+			std::printf(" ");
 		}
-		printf("\n");
+		std::printf("\n");
 	}
-	//printf("values are : %d %d\n", nbLig, nbCol);
+		
+	std::vector<bool> hasWord(nbCol, false);
+	std::vector<Word> words(nbCol);
+	std::uniform_int_distribution<int> spawn_dist(0, 999);
+    constexpr int kSpawnThreshold = 6;   //0.6% per column per frame
 
-	bool hasWord[nbCol];
-	Word words[nbCol];
+	std::string buffer;
+	buffer.reserve(64*1024);
 
-	for(int i(0); i<nbCol; i++){
-		hasWord[i] = false;
-	}
+	while (keepRunning) {
+		if (any_key_pressed()) {
+			raise(SIGINT);
+			break;
+		}
 
-	signal(SIGINT, signalHandler);
+		buffer.clear();
 
-	while(keepRunning){
-		for(int j(0); j<nbCol; j++){
-			if(hasWord[j]){
-				if(words[j].advance(j)){
-					hasWord[j] = false;
-				}
-			}
-			else{
-				if(rand()%1000<14){ //probabilité d'apparition d'un mot de 0.014%
-					hasWord[j] = true;
-					words[j] = Word();
+		for (int col(0); col<nbCol; col++) {
+			if (hasWord[col])
+				hasWord[col] = !words[col].advance(buffer, col);
+			else {
+				if (spawn_dist(rng()) < kSpawnThreshold) {
+					hasWord[col] = true;
+					words[col] = Word();
 				}
 			}
 		}
-		usleep(90*1000);
+
+		std::printf("%s", buffer.c_str());
+        std::fflush(stdout);
+        std::this_thread::sleep_for(std::chrono::milliseconds(120));
 	}
 
-	if(tcsetattr(STDIN_FILENO, TCSADRAIN, &old_term) != 0){
-		printf("Couldn't revert to old terminal");
-		return 1;
-	}
-	printf("\033[m\033[2J\033[?25h\n"); //visible cursor
 	return 0;
 }

@@ -1,2 +1,2 @@
 effect: main.cpp
-	clang++ main.cpp -o effect -O2
+	g++ main.cpp -o effect -O2 -std=c++17
